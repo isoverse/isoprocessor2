@@ -1,0 +1,43 @@
+# R session files
+.RData
+.Rproj.user
+.Rprofile
+.Rhistory
+.Rapp.history
+
+# authentication tokens
+.httr-oauth
+
+# OS generated files
+.DS_Store
+.DS_Store?
+~$*
+.Spotlight*
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary and cache files
+*_cache
+cache
+.quarto
+*.utf8.md
+*.knit.md
+plots
+
+# Package development output files
+*.tar.gz
+*.Rcheck
+doc
+Meta
+release
+pkgdown
+
+# Package specific auxiliary files
+tmp
+README.html
+
+# build artifacts
+/.quarto/
+**/*.quarto_ipynb
+docs

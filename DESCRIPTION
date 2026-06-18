@@ -1,0 +1,43 @@
+Package: isoprocessor2
+Title: Process Stable Isotope Data
+Version: 0.1.0
+Authors@R:
+    c(
+        person(
+        given = "Sebastian", family = "Kopf",
+        email = "sebastian.kopf@colorado.edu",
+        role = c("aut", "cre"),
+        comment = c(ORCID = "0000-0002-2044-0201"))
+    )
+Description: Data processing and reduction pipelines for the stable isotope data
+    read by the isoreader2 package, including peak detection, calibration, standardization, and
+    visualization of isotope ratio mass spectrometry (IRMS) data.
+License: AGPL (>= 3) + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+URL: https://isoprocessor2.isoverse.org/, https://github.com/isoverse/isoprocessor2
+BugReports: https://github.com/isoverse/isoprocessor2/issues
+Depends:
+    R (>= 4.5.0)
+Imports:
+    methods,
+    utils,
+    rlang (>= 1.1.0),
+    cli (>= 3.6.0),
+    tibble,
+    dplyr,
+    tidyr,
+    purrr,
+    withr,
+    stringi,
+    fansi,
+    knitr,
+    isoreader2
+Suggests:
+    testthat (>= 3.0.0),
+    rmarkdown
+Remotes:
+    isoverse/isoreader2
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+Config/roxygen2/version: 8.0.0

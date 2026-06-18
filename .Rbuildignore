@@ -1,0 +1,15 @@
+^isoprocessor2\.Rproj$
+^\.Rproj\.user$
+^[.]?air[.]toml$
+^\.vscode$
+^\.claude$
+^LICENSE\.md$
+^README\.Rmd$
+^README\.html$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^\.github$
+^cache$
+^tmp$
+
