@@ -10,6 +10,6 @@
 #' @import rlang
 #' @importFrom tibble tibble is_tibble as_tibble
 #' @importFrom methods is
-#' @import isoreader
+#' @import isoreader2
 ## usethis namespace: end
 NULL
