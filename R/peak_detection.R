@@ -1,10 +1,15 @@
 # peak detector class ========
 
-#' Create a peak detector
+#' Peak detectors
 #'
-#' Create an `ip_peak_detector` object describing where (and how) peaks should be
-#' detected in a set of chromatographic traces. An `ip_peak_detector` is a tibble
-#' with one row per species/interval combination and the following columns:
+#' Peak detectors describe where (and how) peaks should be detected in a set of
+#' chromatographic traces; apply them with [ip_detect_peaks()]. Use the generic
+#' `ip_peak_detector()` to build a custom detector, the
+#' `ip_slope_based_peak_detector()` for slope-based detection, or the
+#' `ip_isodat_default_detector()` for the common Isodat preset.
+#'
+#' `ip_peak_detector()` creates an `ip_peak_detector` object: a tibble with one
+#' row per species/interval combination and the following columns:
 #'
 #' - `type` (character): the type of the detector. A single call uses one type,
 #'   but detectors with **different** types can be row-bound together (via [c()])
@@ -339,24 +344,45 @@ knit_print.ip_peak_detector <- function(x, ...) {
 #'
 #' A per-peak summary is also stored in the `peaks` dataset, with one row per
 #' `uidx`/`analysis`/`species`/`mass`/`detection_mass`/`peak` (whichever of these
-#' are present) and columns `start.idx`/`end.idx` (the `tp` time-point index),
-#' `start.s`/`end.s` (time), `apex.idx`/`apex.s` (index/time of the maximum
-#' intensity), and `amplitude.<unit>` (the maximum intensity, in the intensity
-#' column's unit).
+#' are present): `start.idx`/`end.idx` (the `tp` time-point index) and
+#' `start.s`/`end.s` (time) of the peak bounds, `apex.idx`/`apex.s` (index/time
+#' of the maximum background-subtracted height), `amplitude.<unit>` (that maximum
+#' background-subtracted height), `bgrd.<unit>` (the background at the apex),
+#' `area.<unit>s` (the integrated background-subtracted peak area) and
+#' `bgrd.<unit>s` (the integrated background area).
+#'
+#' The `area` argument selects how the areas are integrated:
+#' - `"trapezoidal"` (the default) applies the proper trapezoidal rule and is
+#'   interval-safe: it uses the actual time spacing between points, so it is
+#'   correct even when the points are not evenly spaced.
+#' - `"isodat"` reproduces the area calculation used by Isodat (and Qtegra): it
+#'   assumes all time intervals are identical and effectively counts the first
+#'   and last data point in full, whereas the trapezoidal rule counts them at
+#'   half weight. This usually matters little because peaks tend towards zero at
+#'   their ends, but it differs slightly for peaks that do not return to baseline.
+#'   Use it to reproduce Isodat values exactly.
 #'
 #' @param aggregated_data an `ir_aggregated_data` object (from
 #'   `isoreader2::ir_aggregate_isofiles()`) that includes a `traces` dataset.
 #' @param detector an [ip_peak_detector] object.
+#' @param area the peak-area integration method, `"trapezoidal"` (default) or
+#'   `"isodat"`; see Details.
 #' @return the `aggregated_data` with `peak_traces` (one row per data point) and
 #'   `peaks` (one row per peak) datasets added.
 #' @export
-ip_detect_peaks <- function(aggregated_data, detector) {
+ip_detect_peaks <- function(
+  aggregated_data,
+  detector,
+  area = c("trapezoidal", "isodat")
+) {
   # input checks
   check_arg(
     aggregated_data,
     !missing(aggregated_data) && is(aggregated_data, "ir_aggregated_data"),
     "must be a set of aggregated isofiles (use isoreader2::ir_aggregate_isofiles())"
   )
+  area <- arg_match(area)
+  area_fn <- switch(area, trapezoidal = trapezoidal_area, isodat = isodat_area)
   check_arg(
     detector,
     !missing(detector) && is_peak_detector(detector),
@@ -457,7 +483,7 @@ ip_detect_peaks <- function(aggregated_data, detector) {
       ""
     }
     msg <- format_inline(
-      "detected {n_peaks} {col_magenta(species)} {qty(n_peaks)}peak{?s}{filter_note} between {format_peak_interval(start.s, stop.s)}"
+      "detected {.pkg {n_peaks} {col_magenta(species)} {qty(n_peaks)}peak{?s}}{filter_note} between {format_peak_interval(start.s, stop.s)}"
     )
     if (!is.na(details) && nzchar(details)) {
       msg <- paste0(msg, " with ", details)
@@ -470,7 +496,8 @@ ip_detect_peaks <- function(aggregated_data, detector) {
   # store the combined detected peaks and their per-peak summary
   aggregated_data[["peak_traces"]] <- dplyr::bind_rows(results)
   aggregated_data[["peaks"]] <- summarize_peak_traces(
-    aggregated_data[["peak_traces"]]
+    aggregated_data[["peak_traces"]],
+    area_fn = area_fn
   )
   return(aggregated_data)
 }
@@ -479,24 +506,38 @@ ip_detect_peaks <- function(aggregated_data, detector) {
 # (one row per mass per peak). grouping is by whichever of
 # uidx/analysis/species/mass/detection_mass/peak are present. start/end are
 # reported as both the time-point index (`tp`, as *.idx) and the time (`time.s`,
-# as *.s). when a background column (`bgrd.<unit>`) is present, the apex and
-# amplitude are taken from the background-subtracted height (intensity - bgrd)
-# and the background at the apex is reported in a `bgrd.<unit>` column; otherwise
-# the raw intensity is used. the amplitude column is named after the intensity
-# unit (e.g. `amplitude.mV`). returns an empty tibble if there are no peak traces.
-summarize_peak_traces <- function(peak_traces) {
+# as *.s). the apex/amplitude/area are taken from the background-subtracted height
+# (intensity - bgrd), which requires a background column (`bgrd.<unit>`). reported
+# per peak: `amplitude.<unit>` (the max background-subtracted height), `bgrd.<unit>`
+# (the background at the apex), `area.<unit>s` (the background-subtracted peak
+# area) and `bgrd.<unit>s` (the background area), both integrated with `area_fn`
+# (trapezoidal_area or isodat_area). returns an empty tibble if no peak traces.
+summarize_peak_traces <- function(peak_traces, area_fn = trapezoidal_area) {
   if (nrow(peak_traces) == 0L) {
     return(tibble())
   }
 
-  # locate the intensity column to derive the amplitude (and its unit)
+  # locate the intensity column to derive the amplitude/area (and their unit)
   intensity_col <- grep("^intensity\\.", names(peak_traces), value = TRUE)[1L]
   if (is.na(intensity_col)) {
     cli_abort(
       "{.field peak_traces} must have an {.field intensity.*} column to summarize peaks"
     )
   }
-  amplitude_col <- sub("^intensity", "amplitude", intensity_col)
+  unit <- sub("^intensity\\.", "", intensity_col)
+  amplitude_col <- paste0("amplitude.", unit)
+  area_col <- paste0("area.", unit, "s") # e.g. intensity.mV -> area.mVs
+
+  # the background column is required (added by the peak detector's background
+  # detector); the apex value goes to bgrd.<unit> and its area to bgrd.<unit>s
+  bgrd_col <- sub("^intensity\\.", "bgrd.", intensity_col) # e.g. bgrd.mV
+  bgrd_area_col <- paste0("bgrd.", unit, "s") # e.g. bgrd.mVs
+  if (!bgrd_col %in% names(peak_traces)) {
+    cli_abort(c(
+      "{.field peak_traces} must have a {.field {bgrd_col}} background column to summarize peaks",
+      "i" = "the peak detector did not introduce the required background column (did its {.field bgrd_detector} run?)"
+    ))
+  }
 
   # the time-point index column (provided by isoreader2) is required for the
   # *.idx summary columns
@@ -506,22 +547,16 @@ summarize_peak_traces <- function(peak_traces) {
     )
   }
 
-  # background-subtracted height (intensity - bgrd) when a background column is
-  # present, otherwise the raw intensity
-  bgrd_col <- grep("^bgrd\\.", names(peak_traces), value = TRUE)[1L]
-  has_bgrd <- !is.na(bgrd_col)
-  peak_traces$.height <- if (has_bgrd) {
-    peak_traces[[intensity_col]] - peak_traces[[bgrd_col]]
-  } else {
-    peak_traces[[intensity_col]]
-  }
+  # temp columns: background-subtracted height and a copy of the background (the
+  # copy avoids the apex bgrd.<unit> summary overwriting the source it is read from)
+  peak_traces$.height <- peak_traces[[intensity_col]] - peak_traces[[bgrd_col]]
+  peak_traces$.bgrd <- peak_traces[[bgrd_col]]
 
   group_cols <- intersect(
     c("uidx", "analysis", "species", "mass", "detection_mass", "peak"),
     names(peak_traces)
   )
 
-  # apex/amplitude from the height; the bgrd-at-apex column is added when present
   summary_exprs <- rlang::exprs(
     start.idx = .data$tp[which.min(.data$time.s)],
     end.idx = .data$tp[which.max(.data$time.s)],
@@ -530,13 +565,41 @@ summarize_peak_traces <- function(peak_traces) {
     apex.idx = .data$tp[which.max(.data[[".height"]])],
     apex.s = .data$time.s[which.max(.data[[".height"]])]
   )
+  # peak height and background at the apex
   summary_exprs[[amplitude_col]] <- rlang::expr(max(.data[[".height"]]))
-  if (has_bgrd) {
-    summary_exprs[[bgrd_col]] <- rlang::expr(
-      .data[[!!bgrd_col]][which.max(.data[[".height"]])]
-    )
-  }
+  summary_exprs[[bgrd_col]] <- rlang::expr(
+    .data[[".bgrd"]][which.max(.data[[".height"]])]
+  )
+  # integrated areas (method via area_fn): background-subtracted peak area and
+  # background area
+  summary_exprs[[area_col]] <- rlang::expr(
+    (!!area_fn)(.data$time.s, .data[[".height"]])
+  )
+  summary_exprs[[bgrd_area_col]] <- rlang::expr(
+    (!!area_fn)(.data$time.s, .data[[".bgrd"]])
+  )
 
   peak_traces |>
     dplyr::summarize(.by = dplyr::all_of(group_cols), !!!summary_exprs)
+}
+
+# Isodat-style area integral (the difference vs the trapezoidal rule is explained
+# in the ip_detect_peaks() documentation): assumes uniform time intervals and
+# effectively counts the first/last point in full rather than at half weight.
+isodat_area <- function(time.s, intensity) {
+  if (length(time.s) < 2L) {
+    return(0)
+  }
+  sum(intensity) * diff(range(time.s)) / length(time.s)
+}
+
+# trapezoidal area integral of `intensity` over `time.s`; interval-safe (uses the
+# actual time spacing between points) and applies the proper trapezoidal rule
+trapezoidal_area <- function(time.s, intensity) {
+  if (length(time.s) < 2L) {
+    return(0)
+  }
+  sum(
+    diff(time.s) * (utils::head(intensity, -1L) + utils::tail(intensity, -1L)) / 2
+  )
 }

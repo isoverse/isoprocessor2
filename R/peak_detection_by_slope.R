@@ -1,19 +1,16 @@
 # slope-based peak detector ========
 
-#' Create a slope-based peak detector
+#' @rdname ip_peak_detector
+#' @description
+#' `ip_slope_based_peak_detector()` creates a detector with `type =
+#' "slope-based"` that locates peak boundaries from rolling-window regression
+#' slopes of the intensity trace (a background -> peak-start -> peak-top state
+#' machine). The slope thresholds are supplied in the unit matching the intensity
+#' trace: either mV/s (voltage) or pA/s (current); for each of the start/top/end
+#' thresholds supply exactly one of the `.mV_s` / `.pA_s` arguments, all using the
+#' same unit. Its detection parameters are deliberately required (no defaults) so
+#' each detector is explicit.
 #'
-#' Create an [ip_peak_detector] with `type = "slope-based"` that locates peak
-#' boundaries from rolling-window regression slopes of the intensity trace (a
-#' background -> peak-start -> peak-top state machine). The slope thresholds are
-#' supplied in the unit matching the intensity trace: either mV/s (voltage) or
-#' pA/s (current). For each of the start/top/end thresholds supply exactly one of
-#' the `.mV_s` / `.pA_s` arguments, and all three must use the same unit.
-#'
-#' The detection parameters are deliberately required (no defaults) so each
-#' detector is explicit; use [ip_isodat_default_detector()] for a preconfigured
-#' detector with the common Isodat settings.
-#'
-#' @inheritParams ip_peak_detector
 #' @param detection_mass which mass/trace to run detection on: a function applied
 #'   to the available masses to pick one (e.g. `min` or `max`), a specific mass
 #'   number, or a mass label (string).
@@ -42,7 +39,6 @@
 #' @param bgrd_detector an [ip_bgrd_detector] (e.g. [ip_no_bgrd_detector()]) run
 #'   after peak detection to add a `bgrd.<unit>` background column to the detected
 #'   peak traces.
-#' @return an [ip_peak_detector] tibble with `type = "slope-based"`.
 #' @examples
 #' ip_slope_based_peak_detector(
 #'   "CO2",
@@ -188,7 +184,7 @@ ip_slope_based_peak_detector <- function(
     "{col_silver('start/top/end slope')} = {.strong {start_slope}/{top_slope}/{end_slope} {unit_label}}; ",
     "{col_silver('slope window')} = {.strong {slope_window}} ({col_silver('shift')} {.strong {slope_window_shift}}); ",
     "{col_silver('max width')} = {.strong {max_peak_width.s} s}; ",
-    "{col_silver('end @ max height <')} {.strong {peak_end_max_height.pct}%}; ",
+    "{col_silver('end @ max height')} < {.strong {peak_end_max_height.pct}%}; ",
     "{min_height_label}",
     "{col_silver('background')} = {format_bgrd_detector(bgrd_detector)}"
   )
@@ -289,25 +285,16 @@ describe_detection_mass <- function(x) {
   as.character(x)
 }
 
-#' Create the default Isodat slope-based peak detector
+#' @rdname ip_peak_detector
+#' @description
+#' `ip_isodat_default_detector()` is a convenience wrapper around
+#' `ip_slope_based_peak_detector()` preconfigured with the slope-based settings
+#' Isodat uses for continuous-flow data: mV/s slope thresholds of 0.2 (start),
+#' 0.05 (top) and 0.4 (end), the minimum mass as the detection trace, a 5-point
+#' slope window (shifted forward by 1), a 180 s maximum peak width, a 50%
+#' end-max-height criterion, a 50 mV minimum height, and the Isodat individual
+#' background ([ip_isodat_default_background()]).
 #'
-#' A convenience wrapper around [ip_slope_based_peak_detector()] preconfigured
-#' with the slope-based detection settings Isodat uses for continuous-flow data:
-#' mV/s slope thresholds of 0.2 (start), 0.05 (top) and 0.4 (end), the minimum
-#' mass as the detection trace, a 5-point slope window (shifted forward by 1), a
-#' 180 s maximum peak width, a 50% height-drop criterion, and the Isodat
-#' individual background ([ip_isodat_default_background()]).
-#'
-#' @inheritParams ip_peak_detector
-#' @inheritParams ip_slope_based_peak_detector
-#' @param start_slope.mV_s,top_slope.mV_s,end_slope.mV_s slope thresholds in mV/s
-#'   for the rising edge, peak top and falling edge of a peak (Isodat defaults
-#'   0.2, 0.05 and 0.4).
-#' @param min_height.mV the minimum peak height in mV (Isodat default 50); peaks
-#'   below this are filtered out after background detection.
-#' @param bgrd_detector an [ip_bgrd_detector] run after peak detection; defaults
-#'   to [ip_isodat_default_background()].
-#' @return an [ip_peak_detector] tibble with `type = "slope-based"`.
 #' @examples
 #' ip_isodat_default_detector("CO2")
 #' @export
@@ -670,7 +657,7 @@ detect_slope_based_peaks <- function(
 
   if (filtered_out > 0L) {
     attr(combined, "filter_info") <- format_inline(
-      "{filtered_out} additional below the min height threshold filtered out"
+      "{filtered_out} additional below the {col_silver('min height')} threshold filtered out"
     )
   }
   combined

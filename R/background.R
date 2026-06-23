@@ -1,11 +1,17 @@
 # background detector class ========
 
-#' Create a background detector
+#' Background detectors
 #'
-#' Create an `ip_bgrd_detector` object describing how a peak's background (the
-#' baseline that is subtracted from the signal) is determined. Unlike an
-#' [ip_peak_detector] (a tibble), a background detector is a simple single object
-#' (a list) with three elements:
+#' Background detectors describe how a peak's background (the baseline that is
+#' subtracted from the signal) is determined. They are supplied to a peak
+#' detector (e.g. [ip_slope_based_peak_detector()]) and run from within
+#' [ip_detect_peaks()] after peak detection. Use the generic `ip_bgrd_detector()`
+#' to build a custom one, or the built-in `ip_no_bgrd_detector()`,
+#' `ip_individual_bgrd_detector()` and `ip_isodat_default_background()`.
+#'
+#' `ip_bgrd_detector()` creates an `ip_bgrd_detector` object: unlike an
+#' [ip_peak_detector] (a tibble), it is a simple single object (a list) with
+#' three elements:
 #'
 #' - `type` (character): the kind of background detector (shown by [print()]).
 #' - `detect` (function): a function `function(traces, peak_traces)` that returns
@@ -13,12 +19,6 @@
 #'   as the `intensity.<unit>` column, e.g. `bgrd.mV`).
 #' - `details` (character): an optional plain-text summary of the detector's
 #'   parameters (shown by [print()]).
-#'
-#' Background detectors are supplied to a peak detector (e.g.
-#' [ip_slope_based_peak_detector()]), which runs the background detector after
-#' peak detection to add the `bgrd.<unit>` column to the detected peak traces. The
-#' built-in detectors are [ip_no_bgrd_detector()] and
-#' [ip_individual_bgrd_detector()].
 #'
 #' @param type the kind of background detector (a single non-empty string).
 #' @param detect a function `function(traces, peak_traces)` returning
@@ -89,12 +89,11 @@ knit_print.ip_bgrd_detector <- function(x, ...) {
 
 # built-in background detectors ========
 
-#' No-background detector
+#' @rdname ip_bgrd_detector
+#' @description
+#' `ip_no_bgrd_detector()` performs no background subtraction: its `detect` sets
+#' the background to `0` for every data point (`bgrd.<unit> = 0`).
 #'
-#' An [ip_bgrd_detector] that performs no background subtraction: its `detect`
-#' sets the background to `0` for every data point (`bgrd.<unit> = 0`).
-#'
-#' @return an [ip_bgrd_detector] object.
 #' @examples
 #' ip_no_bgrd_detector()
 #' @export
@@ -108,23 +107,18 @@ ip_no_bgrd_detector <- function() {
   )
 }
 
-#' Individual background detector
-#'
-#' An [ip_bgrd_detector] that determines an individual background for each peak
-#' (and each mass) from the baseline leading up to the peak. For every peak it
-#' takes the data points in the chosen history window ending at (and including)
-#' the peak's first point, optionally smooths them, and applies `func` (the
-#' minimum by default) to get a single background value per peak.
-#'
-#' The history window is given either as a number of seconds (`history.s`) or a
-#' number of data points (`history.pts`) ending at the peak's first point; supply
-#' exactly one. `smooth_coefficients` is an odd-length vector of (typically normalized)
-#' weights for a centered moving average (the default `1` means no smoothing);
-#' the extra points needed on each side to smooth the edge of the window are
-#' included automatically.
-#'
-#' [ip_isodat_default_background()] is a convenience wrapper preconfigured with
-#' the Isodat settings (5 s history, 5-point smoothing, minimum).
+#' @rdname ip_bgrd_detector
+#' @description
+#' `ip_individual_bgrd_detector()` determines an individual background for each
+#' peak (and each mass) from the baseline leading up to the peak. For every peak
+#' it takes the data points in the chosen history window ending at (and
+#' including) the peak's first point, optionally smooths them, and applies `func`
+#' (the minimum by default) to get a single background value per peak. The
+#' history window is given either as a number of seconds (`history.s`) or of data
+#' points (`history.pts`); supply exactly one. `smooth_coefficients` is an
+#' odd-length vector of (typically normalized) weights for a centered moving
+#' average (the default `1` means no smoothing); the extra points needed on each
+#' side to smooth the edge of the window are included automatically.
 #'
 #' @param history.s,history.pts the background window ending at each peak's first
 #'   point, as a number of seconds (`history.s`) or of data points
@@ -134,7 +128,6 @@ ip_no_bgrd_detector <- function() {
 #'   applies no smoothing.
 #' @param func a function applied to the (smoothed) background window to produce
 #'   the background value, e.g. [min] (the default) or [max].
-#' @return an [ip_bgrd_detector] object.
 #' @examples
 #' ip_individual_bgrd_detector(history.s = 5)
 #' ip_individual_bgrd_detector(history.pts = 25, func = min)
@@ -211,9 +204,14 @@ ip_individual_bgrd_detector <- function(
   )
 }
 
-#' @describeIn ip_individual_bgrd_detector the Isodat-default individual
-#'   background: the minimum of the smoothed baseline over the last
-#'   `history.pts` data points before each peak (5-point smoothing).
+#' @rdname ip_bgrd_detector
+#' @description
+#' `ip_isodat_default_background()` is the Isodat-default individual background:
+#' the minimum of the smoothed baseline over the last `history.pts` data points
+#' up to each peak (5-point smoothing).
+#'
+#' @examples
+#' ip_isodat_default_background()
 #' @export
 ip_isodat_default_background <- function(
   history.pts = 25,
