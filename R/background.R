@@ -237,11 +237,12 @@ describe_function <- function(f) {
   }
 }
 
-# worker for the individual background detector. for each (mass, peak) in
-# `peak_traces` it computes one background value from that mass's full trace (in
-# `traces`): the data points in the history window ending at (and including) the
-# peak's first point are smoothed (centered moving average) and reduced with
-# `func`. returns `peak_traces` with the background column (bgrd.<unit>) added.
+# worker for the individual background detector. for each peak (per trace, keyed
+# by whichever of uidx/analysis/species/mass are present) in `peak_traces` it
+# computes one background value from that trace's full signal (in `traces`): the
+# data points in the history window ending at (and including) the peak's first
+# point are smoothed (centered moving average) and reduced with `func`. returns
+# `peak_traces` with the background column (bgrd.<unit>) added.
 detect_individual_background <- function(
   traces,
   peak_traces,
@@ -262,45 +263,88 @@ detect_individual_background <- function(
     return(peak_traces)
   }
 
-  # the first (earliest) point of each peak, per mass
-  peak_starts <- peak_traces |>
+  # keys that identify a single trace (one time series): whichever of
+  # uidx/analysis/species/mass are present in both the peak traces and the traces.
+  # keying on all of them (not just mass) makes this safe to run once over several
+  # analyses/species at a time (e.g. from ip_detect_peaks()).
+  trace_keys <- intersect(
+    intersect(c("uidx", "analysis", "species", "mass"), names(peak_traces)),
+    names(traces)
+  )
+  key_str <- function(df) {
+    if (length(trace_keys) == 0L) {
+      return(rep("", nrow(df)))
+    }
+    do.call(paste, c(lapply(df[trace_keys], as.character), sep = "\r"))
+  }
+
+  # the background is determined from the original points only: exclude the points
+  # the time shift added (newly pulled-in real points and the interpolated boundary
+  # points, which may have tp = NA). the resulting per-peak background is still
+  # joined back onto *all* rows below.
+  basis <- if ("tf_added" %in% names(peak_traces)) {
+    dplyr::filter(peak_traces, !.data$tf_added)
+  } else {
+    peak_traces
+  }
+
+  # the first (earliest) point of each peak, per trace. the start is located by
+  # time (not tp) in the full trace below, so it is robust even if a peak's first
+  # point were an interpolated boundary.
+  peak_starts <- basis |>
     dplyr::summarize(
-      .by = c("mass", "peak"),
-      start_tp = .data$tp[which.min(.data$time.s)],
+      .by = dplyr::all_of(c(trace_keys, "peak")),
       start_time = min(.data$time.s)
     )
 
-  # smooth each mass's full trace once; the centered average automatically pulls
+  # smooth each trace's full signal once; the centered average automatically pulls
   # in the points on each side needed to smooth the edges of the history window
-  smoothed_by_mass <- unique(peak_starts$mass) |>
-    rlang::set_names() |>
-    purrr::map(function(m) {
-      mt <- traces |>
-        dplyr::filter(as.character(.data$mass) == as.character(m)) |>
-        dplyr::arrange(.data$time.s)
+  traces_sorted <- dplyr::arrange(traces, .data$time.s)
+  smoothed_by_trace <- split(
+    seq_len(nrow(traces_sorted)),
+    key_str(traces_sorted)
+  ) |>
+    purrr::map(function(idx) {
       list(
-        tp = mt$tp,
-        time.s = mt$time.s,
+        tp = traces_sorted$tp[idx],
+        time.s = traces_sorted$time.s[idx],
         smoothed = as.numeric(
-          stats::filter(mt[[intensity_col]], smooth_coefficients, sides = 2)
+          stats::filter(
+            traces_sorted[[intensity_col]][idx],
+            smooth_coefficients,
+            sides = 2
+          )
         )
       )
     })
 
   use_pts <- !is.na(history.pts)
-  peak_starts[[bg_col]] <- purrr::pmap_dbl(
-    peak_starts[c("mass", "start_tp", "start_time")],
-    function(mass, start_tp, start_time) {
-      s <- smoothed_by_mass[[as.character(mass)]]
-      start_pos <- match(start_tp, s$tp)
-      if (is.na(start_pos)) {
+  ps_keys <- key_str(peak_starts)
+  peak_starts[[bg_col]] <- vapply(
+    seq_len(nrow(peak_starts)),
+    function(i) {
+      s <- smoothed_by_trace[[ps_keys[i]]]
+      if (is.null(s)) {
         return(NA_real_)
       }
+      # the last trace point at (or before) the peak's start time - works whether
+      # the start is a real grid point or an interpolated time-shift boundary
+      at_or_before <- which(
+        s$time.s < peak_starts$start_time[i] |
+          dplyr::near(s$time.s, peak_starts$start_time[i])
+      )
+      if (length(at_or_before) == 0L) {
+        return(NA_real_)
+      }
+      start_pos <- max(at_or_before)
       # the history window ends at (includes) the peak's first point
       core <- if (use_pts) {
         seq.int(start_pos - history.pts + 1L, start_pos)
       } else {
-        which(s$time.s >= start_time - history.s & s$time.s <= start_time)
+        which(
+          s$time.s >= peak_starts$start_time[i] - history.s &
+            s$time.s <= peak_starts$start_time[i]
+        )
       }
       core <- core[core >= 1L & core <= length(s$tp)]
       vals <- s$smoothed[core]
@@ -309,12 +353,13 @@ detect_individual_background <- function(
         return(NA_real_)
       }
       func(vals)
-    }
+    },
+    numeric(1)
   )
 
   dplyr::left_join(
     peak_traces,
-    peak_starts[c("mass", "peak", bg_col)],
-    by = c("mass", "peak")
+    peak_starts[c(trace_keys, "peak", bg_col)],
+    by = c(trace_keys, "peak")
   )
 }

@@ -20,7 +20,13 @@
 #' - `start.s` / `stop.s` (double): the time interval (in seconds) the detector
 #'   covers.
 #' - `detect` (list of functions): a function that takes a tibble of traces and
-#'   returns a tibble of traces (the actual detection step, run later).
+#'   returns a tibble of traces (the actual detection step, run later). It must
+#'   **not** add the background column itself — the background is determined
+#'   separately (see `bgrd`), after the time shift has been applied.
+#' - `bgrd` (list of [ip_bgrd_detector] objects): the background detector bundled
+#'   with the peak detector. It is **not** run by `detect`; instead
+#'   [ip_detect_peaks()] runs it itself, after peak detection and the time shift,
+#'   to add the `bgrd.<unit>` column to the peak traces.
 #' - `details` (character): an optional plain-text description of the detector,
 #'   shown by [print()]. Defaults to `NA`.
 #'
@@ -48,7 +54,12 @@
 #'   minutes (converted to seconds for `start.s` / `stop.s` if those are not
 #'   provided directly).
 #' @param detect a function that takes a tibble of traces and returns a tibble of
-#'   traces. Defaults to an identity function (no-op).
+#'   traces. Defaults to an identity function (no-op). It must not add the
+#'   background column — that is the job of `bgrd`, run later by
+#'   [ip_detect_peaks()].
+#' @param bgrd an [ip_bgrd_detector] bundled with the detector and run by
+#'   [ip_detect_peaks()] (after the time shift) to add the background column.
+#'   Defaults to [ip_no_bgrd_detector()] (no background subtraction).
 #' @param details an optional plain-text description of the detector (a single
 #'   string), shown by [print()]. Defaults to `NA_character_`.
 #' @return an `ip_peak_detector` tibble (one row per species/interval).
@@ -67,6 +78,7 @@ ip_peak_detector <- function(
   start.min = 0,
   stop.min = Inf,
   detect = function(traces) traces,
+  bgrd = ip_no_bgrd_detector(),
   details = NA_character_
 ) {
   # argument checks
@@ -83,6 +95,13 @@ ip_peak_detector <- function(
   check_arg(start.s, is.numeric(start.s), "must be numeric")
   check_arg(stop.s, is.numeric(stop.s), "must be numeric")
   check_arg(detect, is_function(detect), "must be a function")
+  check_arg(
+    bgrd,
+    is_bgrd_detector(bgrd),
+    format_inline(
+      "must be an {.cls ip_bgrd_detector}, e.g. {.emph ip_no_bgrd_detector()}"
+    )
+  )
   check_arg(details, is_scalar_character(details), "must be a single string")
 
   # start/stop must be the same length
@@ -115,6 +134,7 @@ ip_peak_detector <- function(
     dplyr::mutate(
       type = type,
       detect = rep(list(detect), dplyr::n()),
+      bgrd = rep(list(bgrd), dplyr::n()),
       details = details
     ) |>
     dplyr::relocate("type") |>
@@ -342,28 +362,49 @@ knit_print.ip_peak_detector <- function(x, ...) {
 #' `peak_traces` (and `peaks`) cover **all** masses over each detected peak, with
 #' a logical `detection_mass` column marking the mass detection ran on.
 #'
-#' A per-peak summary is also stored in the `peaks` dataset, with one row per
+#' The detection, time shift and background steps run in this order (the time
+#' shift must happen **before** the background is determined, so the background
+#' can be computed on the shift-corrected traces):
+#' 1. the detector's `detect` function finds the peaks and returns the peak traces
+#'    with the `peak` and `detection_mass` columns (but no background column);
+#' 2. a first, simple per-peak summary is computed (without background correction)
+#'    to flag `rectangular` peaks (from the detection mass) and feed the time shift;
+#' 3. the `time_shift` detector (see [ip_time_shift_detector()]) measures each
+#'    mass's apex time offset relative to the detection mass (rectangular peaks
+#'    always get `time_shift.s = 0`), and the shift moves each mass's peak window to
+#'    its own (shifted) peak position. The masses are **not** realigned onto a
+#'    common axis - the shift deliberately leaves their windows offset. Every
+#'    original data point is kept in `peak_traces` (with its value), with two
+#'    logical flags: points the shift pushed out of the window are `tf_removed =
+#'    TRUE` (kept, but excluded from the final integration), and points it brought
+#'    in - newly included real points plus one interpolated boundary point (`tp =
+#'    NA`) at each end when the shift is not a whole number of points - are
+#'    `tf_added = TRUE`;
+#' 4. the background detector bundled with the peak detector (`bgrd`) is run on the
+#'    peak traces, adding the `bgrd.<unit>` column. A point-based detector (e.g.
+#'    [ip_individual_bgrd_detector()]) determines the background from the original
+#'    points only (excluding the `tf_added` points, so the interpolated `tp = NA`
+#'    boundaries never take part) but applies it to every row; only the final
+#'    per-peak integration excludes the `tf_removed` points.
+#'
+#' The final per-peak summary stored in the `peaks` dataset has one row per
 #' `uidx`/`analysis`/`species`/`mass`/`detection_mass`/`peak` (whichever of these
-#' are present): `start.idx`/`end.idx` (the `tp` time-point index) and
-#' `start.s`/`end.s` (time) of the peak bounds, `apex.idx`/`apex.s` (index/time
-#' of the maximum background-subtracted height), `amplitude.<unit>` (that maximum
+#' are present): `start.s`/`end.s` (time) of the peak bounds, `apex.s` (time of the
+#' maximum background-subtracted height), `amplitude.<unit>` (that maximum
 #' background-subtracted height), `bgrd.<unit>` (the background at the apex),
-#' `area.<unit>s` (the integrated background-subtracted peak area) and
-#' `bgrd.<unit>s` (the integrated background area).
+#' `area.<unit>s` (the integrated background-subtracted peak area), `bgrd.<unit>s`
+#' (the integrated background area), the `rectangular` flag and the per-mass
+#' `time_shift.s` (carried over from steps 2-3). The corresponding time-point
+#' indices `start.idx`/`end.idx`/`apex.idx` are only included in debug mode
+#' (`ip_options(debug = TRUE)`).
 #'
-#' Each peak is also flagged `rectangular`: a peak is considered rectangular when
-#' its (background-subtracted) area fills more than `rectangularity_factor` of the
-#' bounding box, i.e. `area / ((end.s - start.s) * amplitude) >
-#' rectangularity_factor`. Rectangularity is determined from the detection mass
-#' and applied to all masses of the peak. Reference (e.g. on/off) peaks tend to be
-#' rectangular, so when `flag_rectangular_peaks_as_ref_peaks = TRUE` (the default)
-#' an additional `ref_peak` column is added that mirrors `rectangular`.
-#'
-#' Once the peaks (and their rectangularity) are known, the `time_shift` detector
-#' (see [ip_time_shift_detector()]) is applied to add a `time_shift.s` column: the
-#' per-mass apex time offset relative to the detection mass. The default
-#' [ip_parabolic_time_shift_detector()] measures it from a parabolic fit of each
-#' apex; rectangular peaks always get `time_shift.s = 0`.
+#' A peak is considered `rectangular` when its (raw) area fills more than
+#' `rectangularity_factor` of the bounding box, i.e. `area / ((end.s - start.s) *
+#' amplitude) > rectangularity_factor`. Rectangularity is determined from the
+#' detection mass and applied to all masses of the peak. Reference (e.g. on/off)
+#' peaks tend to be rectangular, so when `flag_rectangular_peaks_as_ref_peaks =
+#' TRUE` (the default) an additional `ref_peak` column is added that mirrors
+#' `rectangular`.
 #'
 #' The `area` argument selects how the areas are integrated:
 #' - `"trapezoidal"` (the default) applies the proper trapezoidal rule and is
@@ -484,15 +525,18 @@ ip_detect_peaks <- function(
     }) |>
     dplyr::bind_rows()
 
-  # run each detector entry over its species and time window
+  # run each detector entry over its species and time window, collecting the
+  # detected peak traces together with the entry's background detector (which is
+  # NOT run here - see below) and the traces they were detected in
   overall_start <- start_info()
-  results <- list()
+  entries <- list()
   for (i in seq_len(nrow(detector))) {
     row <- detector[i, ]
     species <- row$species
     start.s <- row$start.s
     stop.s <- row$stop.s
     details <- row$details[[1]]
+    bgrd_detector <- row$bgrd[[1]]
 
     entry_traces <- traces |>
       dplyr::filter(
@@ -509,7 +553,9 @@ ip_detect_peaks <- function(
       next
     }
 
-    # a real return must carry peak and detection_mass columns
+    # a real return must carry peak and detection_mass columns, but NOT a
+    # background column - the background detector is run later (after the time
+    # shift), so the shift can be applied before the background is determined
     if (!"peak" %in% names(detected)) {
       cli_abort(
         "the detector's {.field detect} function must return a tibble with a {.field peak} column (for {.emph {species}})"
@@ -541,21 +587,116 @@ ip_detect_peaks <- function(
     }
     finish_info(msg, start = entry_start)
 
-    results[[length(results) + 1L]] <- detected
+    # tag the entry's rows so its own background detector can be applied to
+    # exactly these peak traces once the time shift has been determined
+    detected[[".entry"]] <- length(entries) + 1L
+    entries[[length(entries) + 1L]] <- list(
+      peak_traces = detected,
+      bgrd_detector = bgrd_detector,
+      traces = entry_traces
+    )
   }
 
-  # store the combined detected peaks and their per-peak summary
-  aggregated_data[["peak_traces"]] <- dplyr::bind_rows(results)
-  peaks <- summarize_peak_traces(
-    aggregated_data[["peak_traces"]],
+  # combine the detected peak traces (still without a background column) in time
+  # order; detection_mass is placed right after the mass column
+  peak_traces <- dplyr::bind_rows(purrr::map(entries, "peak_traces"))
+  if (nrow(peak_traces) > 0L) {
+    peak_traces <- dplyr::arrange(peak_traces, .data$time.s)
+    if (all(c("mass", "detection_mass") %in% names(peak_traces))) {
+      peak_traces <- dplyr::relocate(
+        peak_traces,
+        "detection_mass",
+        .after = "mass"
+      )
+    }
+  }
+
+  # first, simple per-peak summary (no background correction): start/apex/end, the
+  # raw amplitude and - for the detection mass only - the raw area, used to flag
+  # the rectangular peaks. this initial summary feeds the time shift detection.
+  peaks_initial <- summarize_peaks_initial(
+    peak_traces,
     area_fn = area_fn,
-    rectangularity_factor = rectangularity_factor,
-    flag_ref = flag_rectangular_peaks_as_ref_peaks
+    rectangularity_factor = rectangularity_factor
   )
-  # apply the time shift detector now that the peaks (and their rectangularity)
-  # are known, adding a time_shift.s column to the per-peak summary
+
+  # measure the per-mass time shift from the initial peaks (the parabolic detector
+  # uses the raw intensity around each apex); rectangular peaks always get 0
+  if (nrow(peaks_initial) > 0L) {
+    peaks_initial <- time_shift$detect(traces, peaks_initial)
+  }
+
+  # apply the detected time shift to the peak traces (moving each mass's window to
+  # its own shifted position, flagging the points the shift removed/added) so the
+  # background below is determined on the shift-corrected traces
+  peak_traces <- apply_peak_time_shift(traces, peak_traces, peaks_initial)
+
+  # run each entry's bundled background detector on its peak traces, adding the
+  # bgrd.<unit> column. the (point-based) detector determines the background from
+  # the original points only - excluding the points the time shift added - but
+  # applies it to every row, so all points (including the removed ones, which keep
+  # their values) carry a background
+  if (length(entries) > 0L && nrow(peak_traces) > 0L) {
+    peak_traces <- purrr::map(seq_along(entries), function(j) {
+      entry <- entries[[j]]
+      entry_peak_traces <- dplyr::filter(peak_traces, .data[[".entry"]] == j)
+      if (nrow(entry_peak_traces) == 0L) {
+        return(entry_peak_traces)
+      }
+      out <- entry$bgrd_detector$detect(entry$traces, entry_peak_traces)
+      if (!is.data.frame(out) || !any(grepl("^bgrd\\.", names(out)))) {
+        cli_abort(
+          "the background detector's {.field detect} must return the peak traces with a {.field bgrd.*} column"
+        )
+      }
+      out
+    }) |>
+      dplyr::bind_rows()
+    if (nrow(peak_traces) > 0L && "time.s" %in% names(peak_traces)) {
+      peak_traces <- dplyr::arrange(peak_traces, .data$time.s)
+    }
+  }
+  if (".entry" %in% names(peak_traces)) {
+    peak_traces[[".entry"]] <- NULL
+  }
+  aggregated_data[["peak_traces"]] <- peak_traces
+
+  # the final per-peak summary integrates only the active points (the time shift's
+  # removed points are excluded), from the background-corrected peak traces
+  active <- if ("tf_removed" %in% names(peak_traces)) {
+    dplyr::filter(peak_traces, !.data$tf_removed)
+  } else {
+    peak_traces
+  }
+
+  # finally, build the per-peak summary from scratch from the active (background-
+  # corrected) peak traces, then carry the rectangular flag and the per-mass time
+  # shift over from the initial peaks (and add ref_peak when requested)
+  peaks <- summarize_peak_traces(active, area_fn = area_fn)
   if (nrow(peaks) > 0L) {
-    peaks <- time_shift$detect(traces, peaks)
+    join_keys <- intersect(
+      c("uidx", "analysis", "species", "mass", "detection_mass", "peak"),
+      names(peaks)
+    )
+    carry <- intersect(c("rectangular", "time_shift.s"), names(peaks_initial))
+    peaks <- dplyr::left_join(
+      peaks,
+      peaks_initial[c(join_keys, carry)],
+      by = join_keys
+    )
+    if (
+      flag_rectangular_peaks_as_ref_peaks && "rectangular" %in% names(peaks)
+    ) {
+      # reference peaks are (by default) the rectangular peaks
+      peaks$ref_peak <- peaks$rectangular
+    }
+    # the time-point indices are only kept in debug mode (the times *.s always are)
+    if (!isTRUE(ip_get_option("debug"))) {
+      peaks <- dplyr::select(
+        peaks,
+        -dplyr::any_of(c("start.idx", "end.idx", "apex.idx"))
+      )
+    }
   }
   aggregated_data[["peaks"]] <- peaks
 
@@ -588,30 +729,29 @@ ip_detect_peaks <- function(
       "{.strong {col_green(n_analytical)}} analytical and ",
       "{.strong {col_yellow(n_rect)}} {rect_label}, ",
       "area integrated with the {.emph {area}} method, ",
-      "with {format_time_shift_detector(time_shift)}"
+      "with time shifts via the {format_time_shift_detector(time_shift)}"
     ),
     start = overall_start
   )
   return(aggregated_data)
 }
 
-# summarize a peak_traces tibble (one row per data point) into a peaks tibble
-# (one row per mass per peak). grouping is by whichever of
-# uidx/analysis/species/mass/detection_mass/peak are present. start/end are
-# reported as both the time-point index (`tp`, as *.idx) and the time (`time.s`,
-# as *.s). the apex/amplitude/area are taken from the background-subtracted height
+# summarize a (background-corrected) peak_traces tibble (one row per data point)
+# into the final peaks tibble (one row per mass per peak). grouping is by whichever
+# of uidx/analysis/species/mass/detection_mass/peak are present. start/end are
+# reported as both the time-point index (`tp`, as *.idx) and the time (`time.s`, as
+# *.s). the apex/amplitude/area are taken from the background-subtracted height
 # (intensity - bgrd), which requires a background column (`bgrd.<unit>`). reported
 # per peak: `amplitude.<unit>` (the max background-subtracted height), `bgrd.<unit>`
 # (the background at the apex), `area.<unit>s` (the background-subtracted peak
 # area) and `bgrd.<unit>s` (the background area), both integrated with `area_fn`
-# (trapezoidal_area or isodat_area). also flags each peak `rectangular` (from its
-# detection-mass area/amplitude vs `rectangularity_factor`, applied to all masses)
-# and, when `flag_ref`, copies it to `ref_peak`. empty tibble if no peak traces.
+# (trapezoidal_area or isodat_area). the rectangular flag and the per-mass time
+# shift are NOT computed here - they come from the initial summary (see
+# summarize_peaks_initial()) and are joined on by ip_detect_peaks(). empty tibble
+# if no peak traces.
 summarize_peak_traces <- function(
   peak_traces,
-  area_fn = trapezoidal_area,
-  rectangularity_factor = 0.55,
-  flag_ref = TRUE
+  area_fn = trapezoidal_area
 ) {
   if (nrow(peak_traces) == 0L) {
     return(tibble())
@@ -647,7 +787,7 @@ summarize_peak_traces <- function(
     )
   }
 
-  # the detection mass flag is required (the rectangularity is taken from it)
+  # the detection mass flag is required (it is one of the grouping columns)
   if (!"detection_mass" %in% names(peak_traces)) {
     cli_abort(c(
       "{.field peak_traces} must have a {.field detection_mass} column to summarize peaks",
@@ -690,10 +830,92 @@ summarize_peak_traces <- function(
   peaks <- peak_traces |>
     dplyr::summarize(.by = dplyr::all_of(group_cols), !!!summary_exprs)
 
-  # rectangularity flag: a peak is "rectangular" if its (background-subtracted)
-  # area fills more than `rectangularity_factor` of the start-to-end x amplitude
-  # box, i.e. area / ((end.s - start.s) * amplitude) > rectangularity_factor. it
-  # is determined from each peak's detection-mass row and applied to all masses.
+  peaks
+}
+
+# summarize a peak_traces tibble into the *initial* peaks tibble: a first, simple
+# per-peak summary computed *without* background correction, used to flag the
+# rectangular peaks and to feed the time shift detection (which both run before the
+# background is determined). grouping is by whichever of
+# uidx/analysis/species/mass/detection_mass/peak are present. reported per peak:
+# start/end as both the time-point index (`tp`, *.idx) and the time (*.s), the apex
+# (`apex.idx`/`apex.s`, at the maximum *raw* intensity), `amplitude.<unit>` (that
+# maximum raw intensity) and - only for the detection mass (the other masses do not
+# need it) - `area.<unit>s` (the raw integrated area, via `area_fn`). each peak is
+# flagged `rectangular` when its (raw) detection-mass area fills more than
+# `rectangularity_factor` of the (end.s - start.s) x amplitude box; the flag is
+# applied to all masses. requires `tp` and `detection_mass`. empty tibble if no
+# peak traces.
+summarize_peaks_initial <- function(
+  peak_traces,
+  area_fn = trapezoidal_area,
+  rectangularity_factor = 0.55
+) {
+  if (nrow(peak_traces) == 0L) {
+    return(tibble())
+  }
+
+  # locate the intensity column to derive the amplitude/area (and their unit)
+  intensity_col <- grep("^intensity\\.", names(peak_traces), value = TRUE)[1L]
+  if (is.na(intensity_col)) {
+    cli_abort(
+      "{.field peak_traces} must have an {.field intensity.*} column to summarize peaks"
+    )
+  }
+  unit <- sub("^intensity\\.", "", intensity_col)
+  amplitude_col <- paste0("amplitude.", unit)
+  area_col <- paste0("area.", unit, "s") # e.g. intensity.mV -> area.mVs
+
+  # the time-point index column (provided by isoreader2) is required for *.idx
+  if (!"tp" %in% names(peak_traces)) {
+    cli_abort(
+      "{.field peak_traces} must have a {.field tp} (time point) column to summarize peaks"
+    )
+  }
+  # the detection mass flag is required (rectangularity and the area are taken
+  # from it)
+  if (!"detection_mass" %in% names(peak_traces)) {
+    cli_abort(c(
+      "{.field peak_traces} must have a {.field detection_mass} column to summarize peaks",
+      "i" = "the peak detection function must return a {.field detection_mass} column"
+    ))
+  }
+
+  # temp column: the raw signal (referenced literally below so the unit-named
+  # intensity column does not need to be injected into the summary expressions)
+  peak_traces$.signal <- peak_traces[[intensity_col]]
+
+  group_cols <- intersect(
+    c("uidx", "analysis", "species", "mass", "detection_mass", "peak"),
+    names(peak_traces)
+  )
+
+  summary_exprs <- rlang::exprs(
+    start.idx = .data$tp[which.min(.data$time.s)],
+    end.idx = .data$tp[which.max(.data$time.s)],
+    start.s = min(.data$time.s),
+    end.s = max(.data$time.s),
+    apex.idx = .data$tp[which.max(.data[[".signal"]])],
+    apex.s = .data$time.s[which.max(.data[[".signal"]])]
+  )
+  # raw peak amplitude (no background correction)
+  summary_exprs[[amplitude_col]] <- rlang::expr(max(.data[[".signal"]]))
+  # raw area, only for the detection mass (the other masses do not need it here)
+  summary_exprs[[area_col]] <- rlang::expr(
+    if (isTRUE(.data$detection_mass[1])) {
+      (!!area_fn)(.data$time.s, .data[[".signal"]])
+    } else {
+      NA_real_
+    }
+  )
+
+  peaks <- peak_traces |>
+    dplyr::summarize(.by = dplyr::all_of(group_cols), !!!summary_exprs)
+
+  # rectangularity flag: a peak is "rectangular" if its (raw) area fills more than
+  # `rectangularity_factor` of the start-to-end x amplitude box, i.e.
+  # area / ((end.s - start.s) * amplitude) > rectangularity_factor. it is
+  # determined from each peak's detection-mass row and applied to all masses.
   rect_rows <- dplyr::filter(peaks, .data$detection_mass)
   peak_keys <- intersect(c("uidx", "analysis", "species", "peak"), names(peaks))
   rect_flags <- rect_rows |>
@@ -705,11 +927,153 @@ summarize_peak_traces <- function(
     ) |>
     dplyr::select(dplyr::all_of(peak_keys), "rectangular")
   peaks <- dplyr::left_join(peaks, rect_flags, by = peak_keys)
-  if (flag_ref) {
-    # reference peaks are (by default) the rectangular peaks
-    peaks$ref_peak <- peaks$rectangular
-  }
   peaks
+}
+
+# apply the per-(peak/mass) time shift (`time_shift.s`, from the initial peaks) to
+# the peak traces: each peak/mass window is moved in time by `time_shift.s` to sit
+# on the mass's own (shifted) peak position. the masses are NOT realigned onto a
+# common axis - the shift deliberately leaves their windows offset; only the
+# boundary points (and the fractional interpolated one) differ between masses, the
+# interior grid points stay shared.
+#
+# for a shift, the new window is [start.s + shift, end.s + shift]. the real data
+# points that fall inside it (taken from the *full* trace, which supplies the
+# points the shift pulls in from outside the original window) keep their measured
+# intensity and `tp`. when the shift is not a whole number of data points (decided
+# with `dplyr::near()` on the fractional remainder) one interpolated boundary point
+# (linear `stats::approx()`, `tp = NA`) is added at each end for the sub-sample
+# remainder.
+#
+# every original point is kept: those the shift pushed out of the window are flagged
+# `tf_removed = TRUE` (and excluded from the downstream area/background), and every
+# point the shift brought in - newly included real points and the interpolated
+# boundary points - is flagged `tf_added = TRUE`. the detection mass (shift 0) is
+# untouched (`tf_removed`/`tf_added` both FALSE). `peaks` is the initial summary
+# carrying `time_shift.s`.
+apply_peak_time_shift <- function(traces, peak_traces, peaks) {
+  # the flags exist even when there is nothing to shift
+  if (nrow(peak_traces) == 0L) {
+    peak_traces$tf_removed <- logical(0)
+    peak_traces$tf_added <- logical(0)
+    return(peak_traces)
+  }
+  peak_traces$tf_removed <- FALSE
+  peak_traces$tf_added <- FALSE
+  if (!"time_shift.s" %in% names(peaks)) {
+    return(peak_traces)
+  }
+  intensity_col <- grep("^intensity\\.", names(peak_traces), value = TRUE)[1L]
+  if (is.na(intensity_col) || !intensity_col %in% names(traces)) {
+    return(peak_traces)
+  }
+
+  # keys identifying a single trace (one time series); the shift applies per
+  # trace + peak
+  trace_keys <- intersect(
+    intersect(c("uidx", "analysis", "species", "mass"), names(peak_traces)),
+    names(traces)
+  )
+  group_keys <- intersect(
+    intersect(c(trace_keys, "peak"), names(peak_traces)),
+    names(peaks)
+  )
+  key_str <- function(df, keys) {
+    if (length(keys) == 0L) {
+      return(rep("", nrow(df)))
+    }
+    do.call(paste, c(lapply(df[keys], as.character), sep = "\r"))
+  }
+
+  # the per (peak/mass) shift, and the full (time-sorted) signal of each trace
+  shift_by_group <- stats::setNames(
+    peaks[["time_shift.s"]],
+    key_str(peaks, group_keys)
+  )
+  traces_sorted <- dplyr::arrange(traces, .data$time.s)
+  trace_rows <- split(
+    seq_len(nrow(traces_sorted)),
+    key_str(traces_sorted, trace_keys)
+  )
+  pt_group_key <- key_str(peak_traces, group_keys)
+  pt_trace_key <- key_str(peak_traces, trace_keys)
+
+  out_groups <- list()
+  for (g in unique(pt_group_key)) {
+    rows_idx <- which(pt_group_key == g)
+    grp <- peak_traces[rows_idx, ]
+    shift <- shift_by_group[[g]]
+    full <- trace_rows[[pt_trace_key[rows_idx[1L]]]]
+    if (
+      is.null(shift) ||
+        is.na(shift) ||
+        dplyr::near(shift, 0) ||
+        is.null(full) ||
+        length(full) < 2L
+    ) {
+      out_groups[[length(out_groups) + 1L]] <- grp
+      next
+    }
+    ft_time <- traces_sorted$time.s[full]
+    ft_int <- traces_sorted[[intensity_col]][full]
+    ft_tp <- if ("tp" %in% names(traces_sorted)) {
+      traces_sorted$tp[full]
+    } else {
+      rep(NA_integer_, length(full))
+    }
+
+    start.s <- min(grp$time.s)
+    end.s <- max(grp$time.s)
+    shifted_start <- start.s + shift
+    shifted_end <- end.s + shift
+    dt <- stats::median(diff(ft_time))
+    # the fractional (sub-sample) remainder; near 0 -> whole-point shift, no
+    # interpolated boundary points
+    frac <- shift - round(shift / dt) * dt
+    has_frac <- !dplyr::near(frac, 0)
+
+    # whether a time falls inside the shifted window (near-inclusive boundaries)
+    in_win <- function(t) {
+      (t > shifted_start | dplyr::near(t, shifted_start)) &
+        (t < shifted_end | dplyr::near(t, shifted_end))
+    }
+
+    # original points the shift pushed out of the window are kept but flagged
+    grp$tf_removed <- !in_win(grp$time.s)
+
+    # real points the shift brought into the window (not already among the
+    # originals) keep their measured intensity and tp, flagged as added
+    ft_in <- which(in_win(ft_time))
+    orig_tps <- grp$tp[!is.na(grp$tp)]
+    add_idx <- ft_in[!(ft_tp[ft_in] %in% orig_tps)]
+
+    template <- grp[1L, , drop = FALSE]
+    make_rows <- function(tp, time.s, intensity) {
+      if (length(time.s) == 0L) {
+        return(NULL)
+      }
+      rr <- template[rep(1L, length(time.s)), , drop = FALSE]
+      rr$tp <- tp
+      rr$time.s <- time.s
+      rr[[intensity_col]] <- intensity
+      rr$tf_removed <- FALSE
+      rr$tf_added <- TRUE
+      rr
+    }
+    added <- make_rows(ft_tp[add_idx], ft_time[add_idx], ft_int[add_idx])
+
+    # the interpolated sub-sample boundary points (tp = NA), only when needed
+    edges <- NULL
+    if (has_frac) {
+      edge_time <- c(shifted_start, shifted_end)
+      edge_int <- stats::approx(ft_time, ft_int, xout = edge_time, rule = 2)$y
+      edges <- make_rows(c(NA_integer_, NA_integer_), edge_time, edge_int)
+    }
+
+    out_groups[[length(out_groups) + 1L]] <- dplyr::bind_rows(grp, added, edges)
+  }
+
+  dplyr::bind_rows(out_groups) |> dplyr::arrange(.data$time.s)
 }
 
 # Isodat-style area integral (the difference vs the trapezoidal rule is explained

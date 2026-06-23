@@ -33,12 +33,14 @@
 #'   checked once the (background-subtracted) signal has dropped to at or below
 #'   this fraction of the peak height.
 #' @param min_height.mV,min_height.pA an optional minimum peak height (in mV or
-#'   pA; supply at most one, matching the slope unit's signal kind). After
-#'   background detection, peaks whose background-subtracted height on the
-#'   detection mass is below this are dropped and the rest renumbered.
-#' @param bgrd_detector an [ip_bgrd_detector] (e.g. [ip_no_bgrd_detector()]) run
-#'   after peak detection to add a `bgrd.<unit>` background column to the detected
-#'   peak traces.
+#'   pA; supply at most one, matching the slope unit's signal kind). Peaks whose
+#'   detection-mass height above the peak's own start point is below this are
+#'   dropped and the rest renumbered. (The true background, determined later by
+#'   [ip_detect_peaks()] after the time shift, is not yet available at detection.)
+#' @param bgrd_detector an [ip_bgrd_detector] (e.g. [ip_no_bgrd_detector()])
+#'   bundled with the detector (stored in its `bgrd` column). It is not run during
+#'   detection but by [ip_detect_peaks()], after the time shift, to add a
+#'   `bgrd.<unit>` background column to the detected peak traces.
 #' @examples
 #' ip_slope_based_peak_detector(
 #'   "CO2",
@@ -151,7 +153,9 @@ ip_slope_based_peak_detector <- function(
   min_height <- resolve_min_height(min_height.mV, min_height.pA)
 
   # detection step — the resolved parameters are captured via this closure's
-  # enclosing environment and handed to the slope-based detection worker
+  # enclosing environment and handed to the slope-based detection worker. note
+  # that the background detector is NOT run here: it is bundled with the peak
+  # detector (the `bgrd` column) and run by ip_detect_peaks() after the time shift.
   detect <- function(traces) {
     detect_slope_based_peaks(
       traces,
@@ -164,7 +168,6 @@ ip_slope_based_peak_detector <- function(
       slope_window_shift = slope_window_shift,
       max_peak_width.s = max_peak_width.s,
       peak_end_max_height.pct = peak_end_max_height.pct,
-      bgrd_detector = bgrd_detector,
       min_height = min_height
     )
   }
@@ -195,6 +198,7 @@ ip_slope_based_peak_detector <- function(
     start.s = start.s,
     stop.s = stop.s,
     detect = detect,
+    bgrd = bgrd_detector,
     details = details
   )
 }
@@ -453,15 +457,15 @@ parse_signal_unit <- function(unit_str) {
 # @param max_peak_width.s force-end peaks wider than this (s).
 # @param peak_end_max_height.pct max height (% of the peak top) at which a peak
 #   may end; the end criterion is only checked at or below this height.
-# @param bgrd_detector an `ip_bgrd_detector` run per analysis group after peak
-#   detection to add the `bgrd.<unit>` background column.
-# @param min_height NULL, or list(value=, unit="mV"/"pA"): after background
-#   detection, peaks whose detection-mass max(intensity - bgrd) is below this are
-#   dropped and the remaining peaks renumbered. The number dropped is attached as
-#   the "filter_info" attribute of the result.
+# @param min_height NULL, or list(value=, unit="mV"/"pA"): peaks whose
+#   detection-mass height above the peak's own start point (max(intensity) minus
+#   the intensity at the first point) is below this are dropped and the remaining
+#   peaks renumbered. (The true background is not yet known at this stage - it is
+#   determined later, by ip_detect_peaks(), after the time shift.) The number
+#   dropped is attached as the "filter_info" attribute of the result.
 # @return a tibble of all masses' rows belonging to detected peaks, with an
-#   integer `peak` column, a logical `detection_mass` column and a `bgrd.<unit>`
-#   column, or `NULL` if no peaks were found.
+#   integer `peak` column and a logical `detection_mass` column (placed right
+#   after `mass`), but no background column, or `NULL` if no peaks were found.
 detect_slope_based_peaks <- function(
   traces,
   detection_mass,
@@ -473,7 +477,6 @@ detect_slope_based_peaks <- function(
   slope_window_shift,
   max_peak_width.s,
   peak_end_max_height.pct,
-  bgrd_detector,
   min_height = NULL
 ) {
   if (nrow(traces) == 0L) {
@@ -603,7 +606,7 @@ detect_slope_based_peaks <- function(
       peak = rep(seq_len(nrow(ranges)) + peak_offset, lengths(tp_by_peak))
     )
     # pull all masses in this group at those time points and flag the detection
-    # mass
+    # mass (placed right after the mass column); the background is NOT added here
     group_peak_traces <- dplyr::inner_join(
       group,
       membership,
@@ -613,18 +616,8 @@ detect_slope_based_peaks <- function(
       dplyr::mutate(
         detection_mass = as.character(.data$mass) ==
           as.character(!!detection_mass_value)
-      )
-
-    # run the background detector for this group (adds the bgrd.<unit> column)
-    group_peak_traces <- bgrd_detector$detect(group, group_peak_traces)
-    if (
-      !is.data.frame(group_peak_traces) ||
-        !any(grepl("^bgrd\\.", names(group_peak_traces)))
-    ) {
-      cli_abort(
-        "the background detector's {.field detect} must return the peak traces with a {.field bgrd.*} column"
-      )
-    }
+      ) |>
+      dplyr::relocate("detection_mass", .after = "mass")
 
     results[[length(results) + 1L]] <- group_peak_traces
     peak_offset <- peak_offset + nrow(ranges)
@@ -637,16 +630,19 @@ detect_slope_based_peaks <- function(
   combined <- dplyr::bind_rows(results) |>
     dplyr::arrange(.data$peak, .data$mass, .data$time.s)
 
-  # drop peaks whose detection-mass background-subtracted height is below the min
-  # height, then renumber the remaining peaks 1..n
+  # drop peaks whose detection-mass height above the peak's own start point is
+  # below the min height, then renumber the remaining peaks 1..n. (the true
+  # background is determined later, by ip_detect_peaks(), so it cannot be used
+  # here; the height above the start point is the rough estimate the state machine
+  # itself uses.)
   filtered_out <- 0L
   if (!is.null(min_height_value)) {
-    bgrd_col <- sub("^intensity\\.", "bgrd.", intensity_col)
     peak_height <- combined |>
       dplyr::filter(.data$detection_mass) |>
       dplyr::summarize(
         .by = "peak",
-        height = max(.data[[intensity_col]] - .data[[bgrd_col]])
+        height = max(.data[[intensity_col]]) -
+          .data[[intensity_col]][which.min(.data$time.s)]
       )
     keep <- peak_height$peak[peak_height$height >= min_height_value]
     filtered_out <- length(unique(combined$peak)) - length(keep)

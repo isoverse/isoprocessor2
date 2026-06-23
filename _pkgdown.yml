@@ -23,6 +23,32 @@ navbar:
     aria-label: View on GitHub
 
 reference:
+- title: Peak detection
+  desc: >
+    Define peak detectors (and apply them) to locate peaks in chromatographic traces.
+  contents:
+  - ip_peak_detector
+  - ip_detect_peaks
+
+- title: Background detection
+  desc: >
+    Define background detectors used (from within peak detection) to subtract the baseline.
+  contents:
+  - ip_bgrd_detector
+
+- title: Time shift detection
+  desc: >
+    Define time shift detectors used (from within peak detection) to measure each
+    mass's apex offset relative to the detection mass.
+  contents:
+  - ip_time_shift_detector
+
+- title: Ratios and deltas
+  desc: >
+    Calculate per-peak isotope ratios and delta values from the detected peaks.
+  contents:
+  - ip_calculate_deltas_vs_ref_gas
+
 - title: Package options
   desc: >
     These functions are available to simplify or customize the data processing.

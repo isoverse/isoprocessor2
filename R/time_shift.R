@@ -51,13 +51,14 @@ is_time_shift_detector <- function(x) {
   is(x, "ip_time_shift_detector")
 }
 
-# the inline representation of a time shift detector ("<type> detector <details>")
-# used both by print() and when summarizing it inside a peak workflow
+# the inline representation of a time shift detector ("<type> detector <details>",
+# mirroring format_bgrd_detector) used both by print() and when summarizing it
+# inside a peak workflow
 format_time_shift_detector <- function(x) {
   if (!is.na(x$details) && nzchar(x$details)) {
-    format_inline("{.field {x$type}} {x$details}")
+    format_inline("{.field {x$type}} detector {x$details}")
   } else {
-    format_inline("{.field {x$type}}")
+    format_inline("{.field {x$type}} detector")
   }
 }
 
