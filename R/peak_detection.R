@@ -359,6 +359,12 @@ knit_print.ip_peak_detector <- function(x, ...) {
 #' rectangular, so when `flag_rectangular_peaks_as_ref_peaks = TRUE` (the default)
 #' an additional `ref_peak` column is added that mirrors `rectangular`.
 #'
+#' Once the peaks (and their rectangularity) are known, the `time_shift` detector
+#' (see [ip_time_shift_detector()]) is applied to add a `time_shift.s` column: the
+#' per-mass apex time offset relative to the detection mass. The default
+#' [ip_parabolic_time_shift_detector()] measures it from a parabolic fit of each
+#' apex; rectangular peaks always get `time_shift.s = 0`.
+#'
 #' The `area` argument selects how the areas are integrated:
 #' - `"trapezoidal"` (the default) applies the proper trapezoidal rule and is
 #'   interval-safe: it uses the actual time spacing between points, so it is
@@ -380,6 +386,8 @@ knit_print.ip_peak_detector <- function(x, ...) {
 #'   exceeds this value (see Details).
 #' @param flag_rectangular_peaks_as_ref_peaks whether to add a `ref_peak` column
 #'   to the `peaks` dataset that mirrors the `rectangular` flag (default `TRUE`).
+#' @param time_shift an [ip_time_shift_detector] used to add the `time_shift.s`
+#'   column to the `peaks` dataset (default [ip_parabolic_time_shift_detector()]).
 #' @return the `aggregated_data` with `peak_traces` (one row per data point) and
 #'   `peaks` (one row per peak) datasets added.
 #' @export
@@ -388,7 +396,8 @@ ip_detect_peaks <- function(
   detector,
   area = c("trapezoidal", "isodat"),
   rectangularity_factor = 0.55,
-  flag_rectangular_peaks_as_ref_peaks = TRUE
+  flag_rectangular_peaks_as_ref_peaks = TRUE,
+  time_shift = ip_parabolic_time_shift_detector()
 ) {
   # input checks
   check_arg(
@@ -411,6 +420,13 @@ ip_detect_peaks <- function(
     is_scalar_logical(flag_rectangular_peaks_as_ref_peaks) &&
       !is.na(flag_rectangular_peaks_as_ref_peaks),
     "must be TRUE or FALSE"
+  )
+  check_arg(
+    time_shift,
+    is_time_shift_detector(time_shift),
+    format_inline(
+      "must be an {.cls ip_time_shift_detector}, e.g. {.emph ip_parabolic_time_shift_detector()}"
+    )
   )
   check_arg(
     detector,
@@ -493,10 +509,15 @@ ip_detect_peaks <- function(
       next
     }
 
-    # a real return must carry a peak column
+    # a real return must carry peak and detection_mass columns
     if (!"peak" %in% names(detected)) {
       cli_abort(
         "the detector's {.field detect} function must return a tibble with a {.field peak} column (for {.emph {species}})"
+      )
+    }
+    if (!"detection_mass" %in% names(detected)) {
+      cli_abort(
+        "the detector's {.field detect} function must return a tibble with a {.field detection_mass} column (for {.emph {species}})"
       )
     }
     n_peaks <- suppressWarnings(max(detected$peak, na.rm = TRUE))
@@ -531,10 +552,15 @@ ip_detect_peaks <- function(
     rectangularity_factor = rectangularity_factor,
     flag_ref = flag_rectangular_peaks_as_ref_peaks
   )
+  # apply the time shift detector now that the peaks (and their rectangularity)
+  # are known, adding a time_shift.s column to the per-peak summary
+  if (nrow(peaks) > 0L) {
+    peaks <- time_shift$detect(traces, peaks)
+  }
   aggregated_data[["peaks"]] <- peaks
 
-  # final summary: how many rectangular (= reference) vs analytical peaks, and the
-  # area integration method, counting each peak once (not once per mass)
+  # final summary: how many rectangular (= reference) vs analytical peaks, the
+  # area integration method and the time shift detector, counting each peak once
   if (nrow(peaks) > 0L && "rectangular" %in% names(peaks)) {
     peak_keys <- intersect(
       c("uidx", "analysis", "species", "peak"),
@@ -558,10 +584,11 @@ ip_detect_peaks <- function(
   }
   finish_info(
     format_inline(
-      "summarized {.strong {n_total}} {qty(n_total)}peak{?s}: ",
+      "detected a total of {.strong {n_total}} {qty(n_total)}peak{?s}: ",
       "{.strong {col_green(n_analytical)}} analytical and ",
       "{.strong {col_yellow(n_rect)}} {rect_label}, ",
-      "area integrated with the {.emph {area}} method"
+      "area integrated with the {.emph {area}} method, ",
+      "with {format_time_shift_detector(time_shift)}"
     ),
     start = overall_start
   )
@@ -620,6 +647,14 @@ summarize_peak_traces <- function(
     )
   }
 
+  # the detection mass flag is required (the rectangularity is taken from it)
+  if (!"detection_mass" %in% names(peak_traces)) {
+    cli_abort(c(
+      "{.field peak_traces} must have a {.field detection_mass} column to summarize peaks",
+      "i" = "the peak detection function must return a {.field detection_mass} column"
+    ))
+  }
+
   # temp columns: background-subtracted height and a copy of the background (the
   # copy avoids the apex bgrd.<unit> summary overwriting the source it is read from)
   peak_traces$.height <- peak_traces[[intensity_col]] - peak_traces[[bgrd_col]]
@@ -659,11 +694,7 @@ summarize_peak_traces <- function(
   # area fills more than `rectangularity_factor` of the start-to-end x amplitude
   # box, i.e. area / ((end.s - start.s) * amplitude) > rectangularity_factor. it
   # is determined from each peak's detection-mass row and applied to all masses.
-  rect_rows <- if ("detection_mass" %in% names(peaks)) {
-    dplyr::filter(peaks, .data$detection_mass)
-  } else {
-    peaks
-  }
+  rect_rows <- dplyr::filter(peaks, .data$detection_mass)
   peak_keys <- intersect(c("uidx", "analysis", "species", "peak"), names(peaks))
   rect_flags <- rect_rows |>
     dplyr::mutate(
@@ -698,6 +729,8 @@ trapezoidal_area <- function(time.s, intensity) {
     return(0)
   }
   sum(
-    diff(time.s) * (utils::head(intensity, -1L) + utils::tail(intensity, -1L)) / 2
+    diff(time.s) *
+      (utils::head(intensity, -1L) + utils::tail(intensity, -1L)) /
+      2
   )
 }
