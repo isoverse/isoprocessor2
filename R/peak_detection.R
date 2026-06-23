@@ -351,6 +351,14 @@ knit_print.ip_peak_detector <- function(x, ...) {
 #' `area.<unit>s` (the integrated background-subtracted peak area) and
 #' `bgrd.<unit>s` (the integrated background area).
 #'
+#' Each peak is also flagged `rectangular`: a peak is considered rectangular when
+#' its (background-subtracted) area fills more than `rectangularity_factor` of the
+#' bounding box, i.e. `area / ((end.s - start.s) * amplitude) >
+#' rectangularity_factor`. Rectangularity is determined from the detection mass
+#' and applied to all masses of the peak. Reference (e.g. on/off) peaks tend to be
+#' rectangular, so when `flag_rectangular_peaks_as_ref_peaks = TRUE` (the default)
+#' an additional `ref_peak` column is added that mirrors `rectangular`.
+#'
 #' The `area` argument selects how the areas are integrated:
 #' - `"trapezoidal"` (the default) applies the proper trapezoidal rule and is
 #'   interval-safe: it uses the actual time spacing between points, so it is
@@ -367,13 +375,20 @@ knit_print.ip_peak_detector <- function(x, ...) {
 #' @param detector an [ip_peak_detector] object.
 #' @param area the peak-area integration method, `"trapezoidal"` (default) or
 #'   `"isodat"`; see Details.
+#' @param rectangularity_factor the rectangularity cutoff (default `0.55`): a peak
+#'   is flagged `rectangular` when `area / ((end.s - start.s) * amplitude)`
+#'   exceeds this value (see Details).
+#' @param flag_rectangular_peaks_as_ref_peaks whether to add a `ref_peak` column
+#'   to the `peaks` dataset that mirrors the `rectangular` flag (default `TRUE`).
 #' @return the `aggregated_data` with `peak_traces` (one row per data point) and
 #'   `peaks` (one row per peak) datasets added.
 #' @export
 ip_detect_peaks <- function(
   aggregated_data,
   detector,
-  area = c("trapezoidal", "isodat")
+  area = c("trapezoidal", "isodat"),
+  rectangularity_factor = 0.55,
+  flag_rectangular_peaks_as_ref_peaks = TRUE
 ) {
   # input checks
   check_arg(
@@ -383,6 +398,20 @@ ip_detect_peaks <- function(
   )
   area <- arg_match(area)
   area_fn <- switch(area, trapezoidal = trapezoidal_area, isodat = isodat_area)
+  check_arg(
+    rectangularity_factor,
+    is.numeric(rectangularity_factor) &&
+      length(rectangularity_factor) == 1L &&
+      !is.na(rectangularity_factor) &&
+      rectangularity_factor > 0,
+    "must be a single positive number"
+  )
+  check_arg(
+    flag_rectangular_peaks_as_ref_peaks,
+    is_scalar_logical(flag_rectangular_peaks_as_ref_peaks) &&
+      !is.na(flag_rectangular_peaks_as_ref_peaks),
+    "must be TRUE or FALSE"
+  )
   check_arg(
     detector,
     !missing(detector) && is_peak_detector(detector),
@@ -440,6 +469,7 @@ ip_detect_peaks <- function(
     dplyr::bind_rows()
 
   # run each detector entry over its species and time window
+  overall_start <- start_info()
   results <- list()
   for (i in seq_len(nrow(detector))) {
     row <- detector[i, ]
@@ -495,9 +525,45 @@ ip_detect_peaks <- function(
 
   # store the combined detected peaks and their per-peak summary
   aggregated_data[["peak_traces"]] <- dplyr::bind_rows(results)
-  aggregated_data[["peaks"]] <- summarize_peak_traces(
+  peaks <- summarize_peak_traces(
     aggregated_data[["peak_traces"]],
-    area_fn = area_fn
+    area_fn = area_fn,
+    rectangularity_factor = rectangularity_factor,
+    flag_ref = flag_rectangular_peaks_as_ref_peaks
+  )
+  aggregated_data[["peaks"]] <- peaks
+
+  # final summary: how many rectangular (= reference) vs analytical peaks, and the
+  # area integration method, counting each peak once (not once per mass)
+  if (nrow(peaks) > 0L && "rectangular" %in% names(peaks)) {
+    peak_keys <- intersect(
+      c("uidx", "analysis", "species", "peak"),
+      names(peaks)
+    )
+    peak_flags <- dplyr::distinct(
+      peaks,
+      dplyr::across(dplyr::all_of(c(peak_keys, "rectangular")))
+    )
+    n_rect <- sum(peak_flags$rectangular)
+    n_analytical <- sum(!peak_flags$rectangular)
+  } else {
+    n_rect <- 0L
+    n_analytical <- 0L
+  }
+  n_total <- n_rect + n_analytical
+  rect_label <- if (flag_rectangular_peaks_as_ref_peaks) {
+    "rectangular/ref"
+  } else {
+    "rectangular"
+  }
+  finish_info(
+    format_inline(
+      "summarized {.strong {n_total}} {qty(n_total)}peak{?s}: ",
+      "{.strong {col_green(n_analytical)}} analytical and ",
+      "{.strong {col_yellow(n_rect)}} {rect_label}, ",
+      "area integrated with the {.emph {area}} method"
+    ),
+    start = overall_start
   )
   return(aggregated_data)
 }
@@ -511,8 +577,15 @@ ip_detect_peaks <- function(
 # per peak: `amplitude.<unit>` (the max background-subtracted height), `bgrd.<unit>`
 # (the background at the apex), `area.<unit>s` (the background-subtracted peak
 # area) and `bgrd.<unit>s` (the background area), both integrated with `area_fn`
-# (trapezoidal_area or isodat_area). returns an empty tibble if no peak traces.
-summarize_peak_traces <- function(peak_traces, area_fn = trapezoidal_area) {
+# (trapezoidal_area or isodat_area). also flags each peak `rectangular` (from its
+# detection-mass area/amplitude vs `rectangularity_factor`, applied to all masses)
+# and, when `flag_ref`, copies it to `ref_peak`. empty tibble if no peak traces.
+summarize_peak_traces <- function(
+  peak_traces,
+  area_fn = trapezoidal_area,
+  rectangularity_factor = 0.55,
+  flag_ref = TRUE
+) {
   if (nrow(peak_traces) == 0L) {
     return(tibble())
   }
@@ -579,8 +652,33 @@ summarize_peak_traces <- function(peak_traces, area_fn = trapezoidal_area) {
     (!!area_fn)(.data$time.s, .data[[".bgrd"]])
   )
 
-  peak_traces |>
+  peaks <- peak_traces |>
     dplyr::summarize(.by = dplyr::all_of(group_cols), !!!summary_exprs)
+
+  # rectangularity flag: a peak is "rectangular" if its (background-subtracted)
+  # area fills more than `rectangularity_factor` of the start-to-end x amplitude
+  # box, i.e. area / ((end.s - start.s) * amplitude) > rectangularity_factor. it
+  # is determined from each peak's detection-mass row and applied to all masses.
+  rect_rows <- if ("detection_mass" %in% names(peaks)) {
+    dplyr::filter(peaks, .data$detection_mass)
+  } else {
+    peaks
+  }
+  peak_keys <- intersect(c("uidx", "analysis", "species", "peak"), names(peaks))
+  rect_flags <- rect_rows |>
+    dplyr::mutate(
+      rectangular = .data[[area_col]] >
+        rectangularity_factor *
+          (.data$end.s - .data$start.s) *
+          .data[[amplitude_col]]
+    ) |>
+    dplyr::select(dplyr::all_of(peak_keys), "rectangular")
+  peaks <- dplyr::left_join(peaks, rect_flags, by = peak_keys)
+  if (flag_ref) {
+    # reference peaks are (by default) the rectangular peaks
+    peaks$ref_peak <- peaks$rectangular
+  }
+  peaks
 }
 
 # Isodat-style area integral (the difference vs the trapezoidal rule is explained
