@@ -14,7 +14,7 @@ test_that("ip_slope_based_peak_detector() builds a slope-based ip_peak_detector"
   expect_match(detector_details(d), "mV/s")
   expect_match(detector_details(d), "slope window = 5")
   expect_match(detector_details(d), "max width = 180 s")
-  expect_match(detector_details(d), "end @ max height < 20%")
+  expect_match(detector_details(d), "peak resolution = 80%")
 })
 
 test_that("ip_slope_based_peak_detector() requires the detection parameters", {
@@ -28,7 +28,7 @@ test_that("ip_slope_based_peak_detector() requires the detection parameters", {
       slope_window = 5L,
       slope_window_shift = 1L,
       max_peak_width.s = 180,
-      peak_end_max_height.pct = 20
+      peak_resolution.pct = 80
     ),
     "function, a single number, or a single string"
   )
@@ -85,7 +85,7 @@ test_that("ip_slope_based_peak_detector() validates type-specific numeric params
   )
   expect_error(make_slope_detector(max_peak_width.s = -1), "positive")
   expect_error(
-    make_slope_detector(peak_end_max_height.pct = 150),
+    make_slope_detector(peak_resolution.pct = 150),
     "between 0 and 100"
   )
 })
@@ -125,7 +125,7 @@ test_that("ip_isodat_default_detector() applies the Isodat defaults", {
   expect_match(detector_details(d), "0.2/0.05/0.4 mV/s")
   expect_match(detector_details(d), "slope window = 5")
   expect_match(detector_details(d), "max width = 180 s")
-  expect_match(detector_details(d), "end @ max height < 50%")
+  expect_match(detector_details(d), "peak resolution = 50%")
 })
 
 test_that("ip_isodat_default_detector() forwards species/start/stop and overrides", {
@@ -133,10 +133,10 @@ test_that("ip_isodat_default_detector() forwards species/start/stop and override
     c("CO2", "N2"),
     start.min = c(0, 5),
     stop.min = c(5, Inf),
-    peak_end_max_height.pct = 30
+    peak_resolution.pct = 30
   )
   expect_equal(nrow(d), 4L)
-  expect_match(detector_details(d), "end @ max height < 30%")
+  expect_match(detector_details(d), "peak resolution = 30%")
 })
 
 # calculate_rolling_slope() ----
@@ -398,7 +398,7 @@ test_that("ip_slope_based_peak_detector() requires an ip_bgrd_detector", {
       slope_window = 5L,
       slope_window_shift = 1L,
       max_peak_width.s = 180,
-      peak_end_max_height.pct = 20
+      peak_resolution.pct = 80
     ),
     "ip_bgrd_detector"
   )

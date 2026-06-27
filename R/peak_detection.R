@@ -331,7 +331,7 @@ print.ip_peak_detector <- function(x, ...) {
         )
       })
     # cli_bullets_raw does not escape < / > (they are taken as markup); double
-    # them so literal angle brackets (e.g. "max height < 50%") render correctly
+    # them so any literal angle brackets in a detector's details render correctly
     lines <- gsub("<", "<<", lines, fixed = TRUE)
     lines <- gsub(">", ">>", lines, fixed = TRUE)
     lines |> cli_bullets_raw() |> cli()

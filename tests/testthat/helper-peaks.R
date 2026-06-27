@@ -51,7 +51,7 @@ make_slope_detector <- function(...) {
       slope_window = 5L,
       slope_window_shift = 1L,
       max_peak_width.s = 180,
-      peak_end_max_height.pct = 20,
+      peak_resolution.pct = 80, # = the old peak_end_max_height.pct of 20
       bgrd_detector = ip_no_bgrd_detector()
     ),
     list(...)
@@ -95,7 +95,7 @@ isodat_args <- list(
   slope_window = 5L,
   slope_window_shift = 1L,
   max_peak_width.s = 180,
-  peak_end_max_height.pct = 50
+  peak_resolution.pct = 50
 )
 
 run_slope_detect <- function(traces, detection_mass = min, ...) {

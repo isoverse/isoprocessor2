@@ -34,7 +34,7 @@ ip_slope_based_peak_detector(
   slope_window,
   slope_window_shift,
   max_peak_width.s,
-  peak_end_max_height.pct,
+  peak_resolution.pct,
   min_height.mV = NA_real_,
   min_height.pA = NA_real_,
   bgrd_detector
@@ -51,7 +51,7 @@ ip_isodat_default_detector(
   top_slope.mV_s = 0.05,
   end_slope.mV_s = 0.4,
   max_peak_width.s = 180,
-  peak_end_max_height.pct = 50,
+  peak_resolution.pct = 50,
   min_height.mV = 50,
   bgrd_detector = ip_isodat_default_background()
 )
@@ -107,10 +107,14 @@ relative to the target point (0 = centered, positive = forward).}
 \item{max_peak_width.s}{the maximum allowed peak width in seconds; peaks
 exceeding this are force-ended.}
 
-\item{peak_end_max_height.pct}{the maximum height, as a percentage of the
-peak's maximum, at which a peak may end: the end-slope criterion is only
-checked once the (background-subtracted) signal has dropped to at or below
-this fraction of the peak height.}
+\item{peak_resolution.pct}{the peak resolution (in \%, matching the
+Isodat/Qtegra "Peak Resolution"): the minimum drop from a peak's top - as a
+percentage of its (background-subtracted) height - required before the peak
+may end or before a shoulder is split off as a separate peak. The end/split
+logic only engages once the signal has dropped to at or below
+\verb{(100 - peak_resolution.pct)\%} of the peak height, so a \emph{higher} resolution
+demands a deeper valley between two maxima for them to be counted as two
+peaks (and otherwise merges them into one).}
 
 \item{min_height.mV, min_height.pA}{an optional minimum peak height (in mV or
 pA; supply at most one, matching the slope unit's signal kind). Peaks whose
@@ -145,9 +149,9 @@ each detector is explicit.
 \code{ip_slope_based_peak_detector()} preconfigured with the slope-based settings
 Isodat uses for continuous-flow data: mV/s slope thresholds of 0.2 (start),
 0.05 (top) and 0.4 (end), the minimum mass as the detection trace, a 5-point
-slope window (shifted forward by 1), a 180 s maximum peak width, a 50\%
-end-max-height criterion, a 50 mV minimum height, and the Isodat individual
-background (\code{\link[=ip_isodat_default_background]{ip_isodat_default_background()}}).
+slope window (shifted forward by 1), a 180 s maximum peak width, a 50\% peak
+resolution (the Isodat default), a 50 mV minimum height, and the Isodat
+individual background (\code{\link[=ip_isodat_default_background]{ip_isodat_default_background()}}).
 }
 \details{
 \code{ip_peak_detector()} creates an \code{ip_peak_detector} object: a tibble with one
@@ -201,7 +205,7 @@ ip_slope_based_peak_detector(
   slope_window = 5L,
   slope_window_shift = 1L,
   max_peak_width.s = 180,
-  peak_end_max_height.pct = 50,
+  peak_resolution.pct = 50,
   bgrd_detector = ip_no_bgrd_detector()
 )
 ip_isodat_default_detector("CO2")
